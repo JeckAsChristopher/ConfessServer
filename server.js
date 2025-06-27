@@ -8,9 +8,14 @@ const multer = require('multer');
 const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'confessions.json');
 const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
+
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type']
+}));
 
 // Ensure directories
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -86,7 +91,7 @@ app.post('/confess', upload.single('photo'), (req, res) => {
     id: Date.now(),
     message,
     time: new Date().toLocaleString(),
-    photo: req.file ? `/uploads/${req.file.filename}` : null,
+    photo: req.file ? `https://confessserver-production.up.railway.app/uploads/${req.file.filename}` : null,
     likes: 0
   };
 
@@ -144,7 +149,9 @@ app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
   }
 });
 
-// 🔹 Start server
-app.listen(PORT, () => {
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Confess Wall running on http://localhost:${PORT}`);
 });
