@@ -11,15 +11,13 @@ const app = express();
 const PORT = 3000;
 const DATA_FILE = path.join(__dirname, 'confessions.json');
 
-app.set('trust proxy', 1);
-
-// Load confessions from file
+// Load confessions from disk
 let confessions = [];
 if (fs.existsSync(DATA_FILE)) {
   try {
     confessions = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
   } catch (err) {
-    console.error("Failed to load saved confessions:", err);
+    console.error("❌ Failed to load saved confessions:", err);
   }
 }
 
@@ -47,57 +45,47 @@ const upload = multer({
 });
 
 // Middleware
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST']
-}));
+app.set('trust proxy', 1);
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static('public')); // Serve public root
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads'))); // ✅ Serve images
 
-// Rate limiter
-// 🚨 Advanced DDoS Detection and Blocking
+// DDoS Rate Limiter
 const ddosLimiter = rateLimit({
-  windowMs: 10 * 1000, // 10 seconds
+  windowMs: 10 * 1000,
   max: 2,
   handler: (req, res) => {
     const ip = req.ip;
     const userAgent = req.get('User-Agent') || 'Unknown';
-    const geo = req.headers['cf-ipcountry'] || 'Unknown'; // requires Cloudflare or reverse proxy
+    const geo = req.headers['cf-ipcountry'] || 'Unknown';
     const now = new Date().toISOString();
 
     const logMessage = `[${now}] BLOCKED DDoS ATTEMPT
 IP Address: ${ip}
 Country: ${geo}
 User-Agent: ${userAgent}
-Reason: Too many requests in short time.
+Reason: Too many requests
 ------------------------------\n`;
 
-    // Save to file
     fs.appendFileSync('ddos-blocked.log', logMessage);
-
-    // Response to attacker
     res.status(429).json({
       status: "BLOCKED DDOS ACTIVITY DETECTED",
-      message: "You are detected as DDOSing the server or website. All these specific information of you will be observed and might block you:",
-      details: {
-        ipAddress: ip,
-        country: geo,
-        userAgent: userAgent
-      },
-      note: "All tools you used to DDOS this server are now saved. This activity may be reported."
+      message: "You are detected as DDOSing the server. Your info has been logged.",
+      details: { ipAddress: ip, country: geo, userAgent: userAgent }
     });
   }
 });
-
-// Apply it on sensitive POST routes
 app.use('/confess', ddosLimiter);
 
-// Get all confessions
+// Routes
+
+// ✅ Get all confessions
 app.get('/confessions', (req, res) => {
   res.json(confessions);
 });
 
-// Post a confession
+// ✅ Submit confession
 app.post('/confess', upload.single('photo'), (req, res) => {
   const message = req.body.message;
   if (!message || !message.trim()) {
@@ -114,16 +102,34 @@ app.post('/confess', upload.single('photo'), (req, res) => {
     message: cleanMessage,
     time: new Date().toLocaleString(),
     photo: req.file ? `/uploads/${req.file.filename}` : null,
-    likes: 0 // 🆕 Start with 0 likes
+    likes: 0
   };
+
+  if (req.file) {
+    console.log("📸 Uploaded file saved:", req.file.path);
+  }
 
   confessions.unshift(confession);
   fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
   res.status(201).json({ success: true, confession });
 });
 
+// ✅ Like a confession
+app.post('/confess/:id/like', (req, res) => {
+  const id = Number(req.params.id);
+  const confession = confessions.find(c => c.id === id);
+  if (!confession) {
+    return res.status(404).json({ success: false, error: 'Confession not found' });
+  }
+
+  confession.likes = (confession.likes || 0) + 1;
+  fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
+  res.json({ success: true, likes: confession.likes });
+});
+
+// ✅ CAPTCHA Verification (Cloudflare Turnstile)
 app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
-  const token = req.body['cf-turnstile-response']; // sent from client
+  const token = req.body['cf-turnstile-response'];
   const ip = req.ip;
 
   if (!token) {
@@ -131,51 +137,34 @@ app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
   }
 
   try {
-    const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret: '0x4AAAAAABik13ClREk0a-QZR-AfbbDlFGQ', // Replace with your real secret
+    const verifyRes = await axios.post(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      new URLSearchParams({
+        secret: '0x4AAAAAABik13ClREk0a-QZR-AfbbDlFGQ', // Replace with real secret
         response: token,
         remoteip: ip
-      })
-    });
+      }).toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
 
-    const result = await verifyRes.json();
+    const result = verifyRes.data;
 
     if (result.success) {
-      // ✅ CAPTCHA passed logic here
-      return res.status(200).json({ success: true, message: 'CAPTCHA verified successfully.' });
+      res.status(200).json({ success: true, message: 'CAPTCHA verified successfully.' });
     } else {
-      // ❌ CAPTCHA failed
-      return res.status(403).json({
+      res.status(403).json({
         success: false,
         message: 'CAPTCHA verification failed.',
         errors: result['error-codes'] || []
       });
     }
   } catch (err) {
-    console.error('Verification error:', err);
-    return res.status(500).json({ success: false, message: 'Server error during CAPTCHA verification.' });
+    console.error('❌ CAPTCHA verification failed:', err);
+    res.status(500).json({ success: false, message: 'Server error during CAPTCHA verification.' });
   }
 });
 
-// Like a confession
-app.post('/confess/:id/like', (req, res) => {
-  const id = Number(req.params.id);
-  const confession = confessions.find(c => c.id === id);
-
-  if (!confession) {
-    return res.status(404).json({ success: false, error: 'Confession not found' });
-  }
-
-  confession.likes = (confession.likes || 0) + 1;
-
-  fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
-  res.json({ success: true, likes: confession.likes });
-});
-
-// Start server
+// ✅ Start the server
 app.listen(PORT, () => {
   console.log(`✅ Confess Wall running at http://localhost:${PORT}`);
 });
