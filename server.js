@@ -48,8 +48,8 @@ const upload = multer({
 app.set('trust proxy', 1);
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
-app.use(express.static('public')); // Serve public root
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads'))); // ✅ Serve images
+app.use(express.static('public'));
+app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
 
 // DDoS Rate Limiter
 const ddosLimiter = rateLimit({
