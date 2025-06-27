@@ -5,6 +5,7 @@ const path = require('path');
 const rateLimit = require('express-rate-limit');
 const sanitizeHtml = require('sanitize-html');
 const multer = require('multer');
+const axios = require('axios');
 
 const app = express();
 const PORT = 3000;
@@ -87,6 +88,44 @@ app.post('/confess', upload.single('photo'), (req, res) => {
   confessions.unshift(confession);
   fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
   res.status(201).json({ success: true, confession });
+});
+
+app.post('/verify-turnstile', async (req, res) => {
+  const token = req.body['cf-turnstile-response']; // sent from client
+  const ip = req.ip;
+
+  if (!token) {
+    return res.status(400).json({ success: false, message: 'Missing CAPTCHA token.' });
+  }
+
+  try {
+    const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        secret: '0x4AAAAAABik13ClREk0a-QZR-AfbbDlFGQ', // Replace with your real secret
+        response: token,
+        remoteip: ip
+      })
+    });
+
+    const result = await verifyRes.json();
+
+    if (result.success) {
+      // ✅ CAPTCHA passed logic here
+      return res.status(200).json({ success: true, message: 'CAPTCHA verified successfully.' });
+    } else {
+      // ❌ CAPTCHA failed
+      return res.status(403).json({
+        success: false,
+        message: 'CAPTCHA verification failed.',
+        errors: result['error-codes'] || []
+      });
+    }
+  } catch (err) {
+    console.error('Verification error:', err);
+    return res.status(500).json({ success: false, message: 'Server error during CAPTCHA verification.' });
+  }
 });
 
 // Like a confession
