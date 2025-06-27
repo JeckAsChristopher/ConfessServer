@@ -11,6 +11,8 @@ const app = express();
 const PORT = 3000;
 const DATA_FILE = path.join(__dirname, 'confessions.json');
 
+app.set('trust proxy', 1);
+
 // Load confessions from file
 let confessions = [];
 if (fs.existsSync(DATA_FILE)) {
@@ -53,12 +55,42 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // Rate limiter
-const limiter = rateLimit({
-  windowMs: 10 * 1000,
-  max: 5,
-  message: { success: false, error: "Too many confessions. Try again later." }
+// 🚨 Advanced DDoS Detection and Blocking
+const ddosLimiter = rateLimit({
+  windowMs: 10 * 1000, // 10 seconds
+  max: 2,
+  handler: (req, res) => {
+    const ip = req.ip;
+    const userAgent = req.get('User-Agent') || 'Unknown';
+    const geo = req.headers['cf-ipcountry'] || 'Unknown'; // requires Cloudflare or reverse proxy
+    const now = new Date().toISOString();
+
+    const logMessage = `[${now}] BLOCKED DDoS ATTEMPT
+IP Address: ${ip}
+Country: ${geo}
+User-Agent: ${userAgent}
+Reason: Too many requests in short time.
+------------------------------\n`;
+
+    // Save to file
+    fs.appendFileSync('ddos-blocked.log', logMessage);
+
+    // Response to attacker
+    res.status(429).json({
+      status: "BLOCKED DDOS ACTIVITY DETECTED",
+      message: "You are detected as DDOSing the server or website. All these specific information of you will be observed and might block you:",
+      details: {
+        ipAddress: ip,
+        country: geo,
+        userAgent: userAgent
+      },
+      note: "All tools you used to DDOS this server are now saved. This activity may be reported."
+    });
+  }
 });
-app.use('/confess', limiter);
+
+// Apply it on sensitive POST routes
+app.use('/confess', ddosLimiter);
 
 // Get all confessions
 app.get('/confessions', (req, res) => {
@@ -90,7 +122,7 @@ app.post('/confess', upload.single('photo'), (req, res) => {
   res.status(201).json({ success: true, confession });
 });
 
-app.post('/verify-turnstile', async (req, res) => {
+app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
   const token = req.body['cf-turnstile-response']; // sent from client
   const ip = req.ip;
 
