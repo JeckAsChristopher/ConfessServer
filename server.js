@@ -91,7 +91,7 @@ app.post('/confess', upload.single('photo'), (req, res) => {
     id: Date.now(),
     message,
     time: new Date().toLocaleString(),
-    photo: req.file ? `https://confessserver-production.up.railway.app/uploads/${req.file.filename}` : null,
+    photo: req.file ? `https://confessserver.onrender.com/uploads/${req.file.filename}` : null,
     likes: 0
   };
 
