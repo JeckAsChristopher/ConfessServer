@@ -8,39 +8,38 @@ const multer = require('multer');
 const axios = require('axios');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'confessions.json');
+const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
 
-// Load confessions from disk
+// Ensure directories
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Load existing confessions
 let confessions = [];
 if (fs.existsSync(DATA_FILE)) {
   try {
     confessions = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
   } catch (err) {
-    console.error("❌ Failed to load saved confessions:", err);
+    console.error("❌ Failed to parse confessions.json:", err.message);
   }
 }
 
-// Ensure uploads directory exists
-const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-// Multer configuration
+// Multer config
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `img_${Date.now()}${ext}`);
+  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+  filename: (_, file, cb) => {
+    const safeName = `img_${Date.now()}${path.extname(file.originalname).toLowerCase()}`;
+    cb(null, safeName);
   }
 });
 const upload = multer({
   storage,
-  fileFilter: (req, file, cb) => {
+  fileFilter: (_, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    if (allowed.includes(file.mimetype)) cb(null, true);
-    else cb(new Error('Only image files are allowed.'));
+    cb(null, allowed.includes(file.mimetype));
   },
-  limits: { fileSize: 2 * 1024 * 1024 } // 2MB limit
+  limits: { fileSize: 2 * 1024 * 1024 } // 2MB
 });
 
 // Middleware
@@ -48,123 +47,104 @@ app.set('trust proxy', 1);
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
+app.use('/uploads', express.static(UPLOAD_DIR));
 
-// DDoS Protection
+// DDoS Rate Limiter
 const ddosLimiter = rateLimit({
   windowMs: 10 * 1000,
   max: 2,
   handler: (req, res) => {
-    const ip = req.ip;
-    const ua = req.get('User-Agent') || 'Unknown';
-    const country = req.headers['cf-ipcountry'] || 'Unknown';
-    const now = new Date().toISOString();
-
-    const log = `[${now}] BLOCKED DDoS ATTEMPT
-IP: ${ip}
-Country: ${country}
-User-Agent: ${ua}
-Reason: Too many requests in short time.
-------------------------------\n`;
-
-    fs.appendFileSync('ddos-blocked.log', log);
-
+    const log = `[${new Date().toISOString()}] 🚫 BLOCKED\nIP: ${req.ip}\nUA: ${req.get('User-Agent')}\nCountry: ${req.headers['cf-ipcountry'] || 'Unknown'}\n`;
+    fs.appendFileSync('ddos-blocked.log', log + '\n');
     res.status(429).json({
       status: "BLOCKED DDOS ACTIVITY DETECTED",
       message: "You are detected as DDOSing the server. Your data has been logged.",
-      details: { ipAddress: ip, country, userAgent: ua }
+      details: { ipAddress: req.ip }
     });
   }
 });
 
 app.use('/confess', ddosLimiter);
 
-// Routes
+// === ROUTES ===
 
-// GET all confessions
+// 🔹 Get all confessions
 app.get('/confessions', (req, res) => {
   res.json(confessions);
 });
 
-// POST a confession
+// 🔹 Post a new confession
 app.post('/confess', upload.single('photo'), (req, res) => {
-  const message = req.body.message;
-  if (!message || !message.trim()) {
+  const raw = req.body.message;
+  if (!raw || !raw.trim()) {
     return res.status(400).json({ success: false, error: 'Message is empty' });
   }
 
-  const cleanMessage = sanitizeHtml(message.trim(), {
-    allowedTags: [],
-    allowedAttributes: {}
-  });
+  const message = sanitizeHtml(raw.trim(), { allowedTags: [], allowedAttributes: {} });
 
   const confession = {
     id: Date.now(),
-    message: cleanMessage,
+    message,
     time: new Date().toLocaleString(),
-    photo: req.file ? `https://confessserver-production.up.railway.app/uploads/${req.file.filename}` : null,
+    photo: req.file ? `/uploads/${req.file.filename}` : null,
     likes: 0
   };
 
-  if (req.file) {
-    console.log("📸 Uploaded file saved:", req.file.path);
-  }
-
   confessions.unshift(confession);
   fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
+
   res.status(201).json({ success: true, confession });
 });
 
-// POST like a confession
+// 🔹 Like a confession
 app.post('/confess/:id/like', (req, res) => {
   const id = Number(req.params.id);
-  const confession = confessions.find(c => c.id === id);
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid ID' });
+  }
 
+  const confession = confessions.find(c => c.id === id);
   if (!confession) {
     return res.status(404).json({ success: false, error: 'Confession not found' });
   }
 
   confession.likes = (confession.likes || 0) + 1;
   fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
+  console.log(`👍 Confession ${id} liked (${confession.likes} total)`);
+
   res.json({ success: true, likes: confession.likes });
 });
 
-// POST verify Turnstile CAPTCHA
+// 🔹 Turnstile CAPTCHA Verification
 app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
   const token = req.body['cf-turnstile-response'];
-  const ip = req.ip;
-
   if (!token) {
     return res.status(400).json({ success: false, message: 'Missing CAPTCHA token.' });
   }
 
   try {
-    const response = await axios.post(
+    const result = await axios.post(
       'https://challenges.cloudflare.com/turnstile/v0/siteverify',
       new URLSearchParams({
-        secret: '0x4AAAAAABik13ClREk0a-QZR-AfbbDlFGQ', // Replace with your real secret key
+        secret: '0x4AAAAAABik13ClREk0a-QZR-AfbbDlFGQ',
         response: token,
-        remoteip: ip
+        remoteip: req.ip
       }).toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
-    if (response.data.success) {
-      res.json({ success: true, message: 'CAPTCHA verified successfully.' });
+    if (result.data.success) {
+      res.json({ success: true, message: 'CAPTCHA verified.' });
     } else {
-      res.status(403).json({
-        success: false,
-        message: 'CAPTCHA verification failed.',
-        errors: response.data['error-codes'] || []
-      });
+      res.status(403).json({ success: false, message: 'Verification failed.', errors: result.data['error-codes'] });
     }
   } catch (err) {
-    console.error("❌ CAPTCHA verification failed:", err.message);
-    res.status(500).json({ success: false, message: 'Internal server error during verification.' });
+    console.error("❌ CAPTCHA verify error:", err.message);
+    res.status(500).json({ success: false, message: 'Internal CAPTCHA error.' });
   }
 });
 
-// Start server
+// 🔹 Start server
 app.listen(PORT, () => {
-  console.log(`✅ Confess Wall running at http://localhost:${PORT}`);
+  console.log(`✅ Confess Wall running on http://localhost:${PORT}`);
 });
