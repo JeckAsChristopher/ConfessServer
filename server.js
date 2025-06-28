@@ -8,18 +8,41 @@ const sanitizeHtml = require('sanitize-html');
 const multer = require('multer');
 const axios = require('axios');
 const { Pool } = require('pg');
+require('dotenv').config();
 
 // ---[ INIT APP ]---
 const app = express();
 const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
-
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ---[ DB CONNECTION ]---
+if (!process.env.DATABASE_URL) {
+  console.error("❌ DATABASE_URL not set in .env");
+  process.exit(1);
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: {
+    require: true,
+    rejectUnauthorized: false
+  }
 });
+
+// ✅ Confirm DB connection and auto-create table
+(async () => {
+  try {
+    await pool.query('SELECT NOW()');
+    console.log("✅ DB connected");
+
+    const schema = fs.readFileSync(path.join(__dirname, 'confessions.sql'), 'utf8');
+    await pool.query(schema);
+    console.log("✅ Table check/created");
+  } catch (err) {
+    console.error("❌ DB init error:", err);
+    process.exit(1);
+  }
+})();
 
 // ---[ MULTER CONFIG ]---
 const storage = multer.diskStorage({
@@ -35,7 +58,7 @@ const upload = multer({
     const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     cb(null, allowed.includes(file.mimetype));
   },
-  limits: { fileSize: 2 * 1024 * 1024 } // 2MB
+  limits: { fileSize: 2 * 1024 * 1024 }
 });
 
 // ---[ MIDDLEWARE ]---
@@ -69,7 +92,7 @@ app.get('/confessions', async (req, res) => {
     const result = await pool.query('SELECT * FROM confessions ORDER BY id DESC');
     res.json(result.rows);
   } catch (err) {
-    console.error("❌ DB fetch error:", err.message);
+    console.error("❌ DB fetch error:", err);
     res.status(500).json({ success: false, error: 'Failed to fetch confessions' });
   }
 });
@@ -87,7 +110,7 @@ app.post('/confess', upload.single('photo'), async (req, res) => {
     id: Date.now(),
     message,
     time: new Date().toLocaleString(),
-    photo: req.file ? `https://confessserver.onrender.com/uploads/${req.file.filename}` : null,
+    photo: req.file ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}` : null,
     likes: 0
   };
 
@@ -100,7 +123,7 @@ app.post('/confess', upload.single('photo'), async (req, res) => {
 
     res.status(201).json({ success: true, confession });
   } catch (err) {
-    console.error("❌ DB insert error:", err.message);
+    console.error("❌ DB insert error:", err);
     res.status(500).json({ success: false, error: 'DB insert failed' });
   }
 });
@@ -124,7 +147,7 @@ app.post('/confess/:id/like', async (req, res) => {
 
     res.json({ success: true, likes: result.rows[0].likes });
   } catch (err) {
-    console.error("❌ Like update error:", err.message);
+    console.error("❌ Like update error:", err);
     res.status(500).json({ success: false, error: 'DB update failed' });
   }
 });
@@ -153,11 +176,12 @@ app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
       res.status(403).json({ success: false, message: 'Verification failed.', errors: result.data['error-codes'] });
     }
   } catch (err) {
-    console.error("❌ CAPTCHA verify error:", err.message);
+    console.error("❌ CAPTCHA verify error:", err);
     res.status(500).json({ success: false, message: 'Internal CAPTCHA error.' });
   }
 });
 
+// ---[ START SERVER ]---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Confess Wall running on http://localhost:${PORT}`);
