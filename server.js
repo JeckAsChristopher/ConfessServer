@@ -1,3 +1,4 @@
+// ---[ CORE DEPENDENCIES ]---
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -6,31 +7,21 @@ const rateLimit = require('express-rate-limit');
 const sanitizeHtml = require('sanitize-html');
 const multer = require('multer');
 const axios = require('axios');
+const { Pool } = require('pg');
 
+// ---[ INIT APP ]---
 const app = express();
-const DATA_FILE = path.join(__dirname, 'confessions.json');
 const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type']
-}));
-
-// Ensure directories
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// Load existing confessions
-let confessions = [];
-if (fs.existsSync(DATA_FILE)) {
-  try {
-    confessions = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-  } catch (err) {
-    console.error("❌ Failed to parse confessions.json:", err.message);
-  }
-}
+// ---[ DB CONNECTION ]---
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-// Multer config
+// ---[ MULTER CONFIG ]---
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, UPLOAD_DIR),
   filename: (_, file, cb) => {
@@ -47,14 +38,14 @@ const upload = multer({
   limits: { fileSize: 2 * 1024 * 1024 } // 2MB
 });
 
-// Middleware
+// ---[ MIDDLEWARE ]---
 app.set('trust proxy', 1);
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOAD_DIR));
 
-// DDoS Rate Limiter
+// ---[ DDoS Rate Limiter ]---
 const ddosLimiter = rateLimit({
   windowMs: 10 * 1000,
   max: 2,
@@ -68,18 +59,23 @@ const ddosLimiter = rateLimit({
     });
   }
 });
-
 app.use('/confess', ddosLimiter);
 
 // === ROUTES ===
 
 // 🔹 Get all confessions
-app.get('/confessions', (req, res) => {
-  res.json(confessions);
+app.get('/confessions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM confessions ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ DB fetch error:", err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch confessions' });
+  }
 });
 
 // 🔹 Post a new confession
-app.post('/confess', upload.single('photo'), (req, res) => {
+app.post('/confess', upload.single('photo'), async (req, res) => {
   const raw = req.body.message;
   if (!raw || !raw.trim()) {
     return res.status(400).json({ success: false, error: 'Message is empty' });
@@ -95,29 +91,42 @@ app.post('/confess', upload.single('photo'), (req, res) => {
     likes: 0
   };
 
-  confessions.unshift(confession);
-  fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
+  try {
+    await pool.query(
+      `INSERT INTO confessions (id, message, time, photo, likes)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [confession.id, confession.message, confession.time, confession.photo, confession.likes]
+    );
 
-  res.status(201).json({ success: true, confession });
+    res.status(201).json({ success: true, confession });
+  } catch (err) {
+    console.error("❌ DB insert error:", err.message);
+    res.status(500).json({ success: false, error: 'DB insert failed' });
+  }
 });
 
 // 🔹 Like a confession
-app.post('/confess/:id/like', (req, res) => {
+app.post('/confess/:id/like', async (req, res) => {
   const id = Number(req.params.id);
   if (!id || isNaN(id)) {
     return res.status(400).json({ success: false, error: 'Invalid ID' });
   }
 
-  const confession = confessions.find(c => c.id === id);
-  if (!confession) {
-    return res.status(404).json({ success: false, error: 'Confession not found' });
+  try {
+    const result = await pool.query(
+      'UPDATE confessions SET likes = likes + 1 WHERE id = $1 RETURNING likes',
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Confession not found' });
+    }
+
+    res.json({ success: true, likes: result.rows[0].likes });
+  } catch (err) {
+    console.error("❌ Like update error:", err.message);
+    res.status(500).json({ success: false, error: 'DB update failed' });
   }
-
-  confession.likes = (confession.likes || 0) + 1;
-  fs.writeFileSync(DATA_FILE, JSON.stringify(confessions, null, 2));
-  console.log(`👍 Confession ${id} liked (${confession.likes} total)`);
-
-  res.json({ success: true, likes: confession.likes });
 });
 
 // 🔹 Turnstile CAPTCHA Verification
@@ -149,9 +158,7 @@ app.post('/verify-turnstile', ddosLimiter, async (req, res) => {
   }
 });
 
-
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Confess Wall running on http://localhost:${PORT}`);
 });
